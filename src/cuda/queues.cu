@@ -33,6 +33,10 @@ char compare_events(Event *event_1, Event *event_2);
 
 char malloc_queues(uint n_nodes,
 uint events_per_node, uint states_per_node, uint antimsgs_per_node) {
+
+
+	printf("[malloc_queues] n_nodes = %u, events_per_node = %u, states_per_node = %u, antimsgs_per_node = %u, g_nodes_per_lp = %u\n", n_nodes, events_per_node, states_per_node, antimsgs_per_node, g_nodes_per_lp);
+
 	cudaError_t err;
 
 	EQs h_eq;
@@ -90,6 +94,8 @@ uint events_per_node, uint states_per_node, uint antimsgs_per_node) {
 		sizeof(uint) * n_nodes);
 	if (err != cudaSuccess) { return 0; }
 	cudaMemcpyToSymbol(sq, &h_sq, sizeof(SQs));
+
+	printf("[malloc_queues] Allocating %d * %d states\n", n_nodes, states_per_node);
 
 	err = cudaMalloc(&(h_sq.states),
 		sizeof(State) * n_nodes * states_per_node);
@@ -154,6 +160,8 @@ uint events_per_node, uint states_per_node, uint antimsgs_per_node) {
 	events_per_lp = events_per_node * g_nodes_per_lp;
 	states_per_lp = states_per_node * g_nodes_per_lp;
 	antimsgs_per_lp = antimsgs_per_node * g_nodes_per_lp;
+
+	printf("queues params: g_nodes_per_lp = %u, events_per_lp = %d, states_per_lp = %u, antimsgs_per_lp = %u\n", g_nodes_per_lp, events_per_lp, states_per_lp, antimsgs_per_lp);
 }
 
 __device__
@@ -572,8 +580,18 @@ void undo_event(Event *event) {
 		}
 	}
 
+	#ifdef COMPADS_DESL
+	printf("[LPID %u] ERROR: undo_event(Event Sender: %-5llu | Receiver: %-5llu | Type: %u | TS: %-10.6f)\n", 
+        lpid,
+		(unsigned long long)event->sender, 
+        (unsigned long long)event->receiver, 
+        event->type, 
+        event->timestamp);
+	#else
 	printf("ERROR: undo_event(Event %7d %7d %d)\n",
 		event->sender, event->receiver, event->timestamp);
+	#endif
+
 	asm("trap;");
 }
 #endif
@@ -627,7 +645,13 @@ char state_queue_is_full(uint lpid) {
 __device__
 void append_state_to_queue(State *state, uint lpid) {
 	uint index = get_state_index(lpid, sq.bo[lpid], sq.ql[lpid]);
+
+	//printf("[append_state_to_queue, lpid %u] index is %u\n", lpid, index);
+	//printf("[append_state_to_queue, lpid %u] The value of sq.ql[lpid] is %d\n", lpid, sq.ql[lpid]);
+
 	sq.ql[lpid] ++;
+
+	//printf("[append_state_to_queue, lpid %u] sizeof State is %d\n", lpid, sizeof(State));
 
 	sq.states[index] = *state;
 }
@@ -660,6 +684,18 @@ void append_antimsg_to_queue(Event *antimsg) {
 	uint index = get_antimsg_index(lpid, amq.bo[lpid], amq.ql[lpid]);
 	amq.ql[lpid] ++;
 
+
+	/*
+	printf("[lpid %u] appending antimsg to queue with sender %llu, receiver %llu, type %u and timestamp %f: antimsg queue size is %u\n", 
+          lpid,
+		  (unsigned long long)antimsg->sender, 
+          (unsigned long long)antimsg->receiver, 
+          (unsigned int)antimsg->type, 
+          antimsg->timestamp,
+		  amq.ql[lpid]
+		);
+		*/
+
 	amq.antimsgs[index] = *antimsg;
 }
 
@@ -673,10 +709,13 @@ void delete_first_n_antimsgs(uint lpid, uint n) {
 
 __device__
 Event* delete_last_antimsg(uint lpid) {
-	amq.ql[lpid] --;
 
+	//printf("AMQ queue lenght before removing antimsg is %u\n", amq.ql[lpid]);
+
+	amq.ql[lpid] --;
 	uint index = get_antimsg_index(lpid, amq.bo[lpid], amq.ql[lpid]);
 	return &(amq.antimsgs[index]);
+
 }
 
 __device__ // private
@@ -721,3 +760,5 @@ char compare_events(Event *event_1, Event *event_2) {
 
 	return 0;
 }
+
+

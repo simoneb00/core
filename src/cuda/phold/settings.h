@@ -21,7 +21,7 @@
 #define GVT_PERIOD 	(200*1000)
 
 #define CPU_ENABLED true
-#define GPU_ENABLED false
+#define GPU_ENABLED true
 
 #define	OPTM_SYNC	1
 #define ALLOW_ME	1

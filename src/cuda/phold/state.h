@@ -15,10 +15,46 @@
 #ifndef State_h
 #define State_h
 
+#ifdef PHOLD_OLD
 #include <curand_kernel.h>
 
 typedef struct {
 	curandState_t cr_state;
 } State;
+#endif
+
+#ifdef PHOLD_DESL
+#include <curand_kernel.h>
+
+typedef struct {
+  curandState_t cr_state;
+} State;
+
+#endif
+
+#ifdef COMPADS_DESL
+
+#define MAX_BUFFERS 16
+#define MAX_BUFFER_SIZE 32
+
+typedef __uint128_t test_rng_state;
+
+typedef struct lp_buffer {
+	unsigned count;
+	int next;
+	uint64_t data[MAX_BUFFER_SIZE];
+} buffer;
+
+typedef struct {
+	unsigned events;
+	unsigned buffer_count;
+	uint32_t total_checksum;
+	test_rng_state rng_state;
+	buffer buffers[MAX_BUFFERS];
+	int head;
+  unsigned sent_antimsgs;
+} State;
+#endif
+
 
 #endif

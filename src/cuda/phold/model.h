@@ -15,11 +15,22 @@
 
 #include <stdio.h>
 #include "event.h"
-#include "state.h"
 
+#ifdef COMPADS_DESL
+typedef struct {
+    unsigned *events;
+	unsigned *buffer_count;
+	uint32_t *total_checksum;
+	test_rng_state *rng_state;
+	buffer *buffers;
+	int *head;
+} Nodes;
+
+#else
 typedef struct {
 	curandState_t	*cr_state;
 } Nodes;
+#endif
 
 char malloc_nodes(uint n_nodes);
 

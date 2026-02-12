@@ -70,6 +70,7 @@ void kernel_handle_next_event(int gvt, int window_size,
 uint *n_inac_1, uint *n_inac_2, uint *n_inac_3,
 uint *n_inac_4, uint *n_inac_5, uint *n_inac_6) {
 	uint lpid = blockIdx.x * blockDim.x + threadIdx.x;
+
 	if (lpid >= g_n_lps) { return; }
 
 	if (has_next_event(lpid) == 0) {

@@ -75,24 +75,15 @@ void __attribute__ ((noinline)) busy_loop(unsigned long long max) {
     }
 }
 
-static uint get_receiver(uint me, curandState_t *cr_state, int now)
-{
-	int cur_hot_phase = (now / PHASE_WINDOW_SIZE);
-	double HOT_FRACTION = load_trace[cur_hot_phase];
-	return (unsigned int) cpu_random(cr_state, HOT_FRACTION * conf.lps) / (HOT_FRACTION);
-}
-
 static void phold(lp_id_t me, simtime_t now, void *msg, curandState_t *state)
 {
   busy_loop(DURATION);
   
-  //lp_id_t dest = me;
-  //if (cpu_curand(state) <= cpu_p_remote) 
-  //{
-  //  dest = ((lp_id_t)((cpu_curand(state) * num_lps)));
-  //}
-
-  lp_id_t dest = get_receiver(me, state, (int)now);
+  lp_id_t dest = me;
+  if (cpu_curand(state) <= cpu_p_remote) 
+  {
+    dest = ((lp_id_t)((cpu_curand(state) * num_lps)));
+  }
 
   struct PHoldMessage new_event = { 0 };
   Envelope e = {

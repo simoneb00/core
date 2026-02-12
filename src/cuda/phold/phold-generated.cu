@@ -15,16 +15,28 @@
 #include <cuda/cuda_gpu.h>
 #include <cuda/queues.h>
 #include <cuda/kernels.h>
-
 #include <cuda/random.h>
-#include "model.h"
+
 #include "settings.h"
 #include "settings_gpu.h"
 
 
-__device__ static Nodes nodes;
+#define EVENT 100
+
+typedef struct {
+    curandState_t   *cr_state;
+    uint64_t        *complete_events; 
+} PHoldNodes;
+
+// stato
+typedef struct {
+	curandState_t   cr_state;
+    uint64_t        complete_events;
+} phold_state;
+
+__device__ static PHoldNodes nodes;
 __device__ static uint	population;
-__device__ static int	lookahead;
+__device__ static int lookahead;
 __device__ static int	mean;
 
 
@@ -37,37 +49,54 @@ extern "C" uint get_n_blocks();
 
 
 
+
+__device__ int32_t start_events = 1;
+__device__ double p_remote = 0.25;
+__device__ uint32_t num_lps = 5000;
+
+
 curandState_t *simulation_snapshot;
+uint64_t *complete_events;
 uint *sim_bo;
 uint *sim_so;
 uint *sim_uo;
 uint *sim_ql;
 Event *sim_events;
 
+
 char malloc_nodes(uint n_nodes) {
 	cudaError_t err;
 
-	Nodes h_nodes;
-	simulation_snapshot = (curandState_t*) malloc(sizeof(curandState_t)*n_nodes);
+	PHoldNodes h_nodes;
+	
+    // alloca stato per tutti gli LP
+    simulation_snapshot = (curandState_t*) malloc(sizeof(curandState_t)*n_nodes);
+    complete_events = (uint64_t *)malloc(sizeof(uint64_t)*n_nodes);
+
 	if(!sim_bo) sim_bo = (uint*)malloc(sizeof(uint) * n_nodes);
 	if(!sim_so) sim_so = (uint*)malloc(sizeof(uint) * n_nodes);
 	if(!sim_uo) sim_uo = (uint*)malloc(sizeof(uint) * n_nodes);
 	if(!sim_ql) sim_ql = (uint*)malloc(sizeof(uint) * n_nodes);
+
+    // alloca i messaggi per tutti gli LP
 	if(!sim_events) sim_events = (Event*)malloc(sizeof(Event) * n_nodes * events_per_node);
 
-	if(!simulation_snapshot) {printf("no memory for HOST side model state\n"); exit(1); }
+	if(!simulation_snapshot || !complete_events || !sim_events) {printf("no memory for HOST side model state\n"); exit(1); }
 
 	err = cudaMalloc(&(h_nodes.cr_state), sizeof(curandState_t) * n_nodes);
 	if (err != cudaSuccess) { return 0; }
-	cudaMemcpyToSymbol(nodes, &h_nodes, sizeof(Nodes));
+    err = cudaMalloc(&(h_nodes.complete_events), sizeof(uint64_t) * n_nodes);
+	if (err != cudaSuccess) { return 0; }
+	cudaMemcpyToSymbol(nodes, &h_nodes, sizeof(PHoldNodes));
 
 	return 1;
 }
 
 void free_nodes() {
-	Nodes h_nodes;
-	cudaMemcpyFromSymbol(&h_nodes, nodes, sizeof(Nodes));
+	PHoldNodes h_nodes;
+	cudaMemcpyFromSymbol(&h_nodes, nodes, sizeof(PHoldNodes));
 	cudaFree(h_nodes.cr_state);
+    cudaFree(h_nodes.complete_events);
 }
 
 __device__
@@ -82,89 +111,128 @@ int get_lookahead() {
 	return lookahead;
 }
 
+
 __device__
 void init_node(uint nid) {
 	curand_init(nid, 0, 0, &(nodes.cr_state[nid]));
+    lp_id_t me = nid;
 
-	uint n_events = population / g_n_nodes;
-	if (nid < population % g_n_nodes) { n_events += 1; }
+    struct PHoldMessage new_event = { 0 };
+  
+    Envelope e = {
+        .priority = 5.0,
+        .sender = me
+    };
 
-	for (uint i = 0; i < n_events; i++) {
-		Event event;
-		event.type = 1;
-		event.sender = nid;
-		event.receiver = nid;
-		event.timestamp = i;
+    Event new_msg{};
+    new_msg.envelope = e;
+    new_msg.payload  = new_event;
 
-		append_event_to_queue(&event);
-	}
+    for ( int32_t i = 0 ; i < start_events; i++ ) {
+        new_msg.receiver = me;
+        new_msg.timestamp = random_exp(&(nodes.cr_state[nid]), mean) + lookahead;
+        new_msg.type = EVENT;
+		new_msg.sender = me;
+        append_event_to_queue(&new_msg);
+    }
 }
-
 
 __device__
 void reinit_node(uint nid, int gvt) {
 
-	uint n_events = population / g_n_nodes;
+	lp_id_t me = nid;
+
 	curandState_t *cr_state = &(nodes.cr_state[nid]);
 
-	for (uint i = 0; i < n_events; i++) {
-		Event new_event;
-		new_event.type = 1;
-		new_event.sender = nid;
-		new_event.receiver = random(cr_state, g_n_nodes);
-		new_event.timestamp = gvt + lookahead + random_exp(cr_state, mean);
+	struct PHoldMessage new_event = { 0 };
 
-		char res = append_event_to_queue(&new_event);
+	Envelope e = {
+        .priority = 5.0,
+        .sender = me
+    };
+
+    Event new_msg{};
+    new_msg.envelope = e;
+    new_msg.payload  = new_event;
+
+	for (uint i = 0; i < start_events; i++) {
+		new_msg.receiver = me;
+		new_msg.timestamp = random_exp(&(nodes.cr_state[nid]), mean) + lookahead;
+        new_msg.type = EVENT;
+		new_msg.sender = me;
+
+		char res = append_event_to_queue(&new_msg);
 	}
 }
 
-__device__ static int hot_phase_count = 0;
+__device__
+char phold(uint64_t me, double now, Event *msg)
+{
+  curandState_t *cr_state = &(nodes.cr_state[me]);
+  nodes.complete_events[me]++;
+  // s->complete_events++;
+  //busy_loop(1000.0);
+  
+  lp_id_t dest = me;
+  if (curand(cr_state) <= p_remote) 
+  {
+    dest = ((lp_id_t)((curand(cr_state) * num_lps)));
+  }
+
+  struct PHoldMessage new_event = { 0 };
+  Envelope e = {
+    .priority = 5.0,
+    .sender = me
+  };
+  Event new_msg;
+  new_msg.envelope = e;
+  new_msg.payload = new_event;
+  
+
+  new_msg.receiver = dest;
+  new_msg.timestamp = now + random_exp(cr_state, mean) + lookahead;
+  new_msg.type = EVENT;
+  new_msg.sender = me;
+  char res = append_event_to_queue(&new_msg);
+  if (res == 0) {
+	printf("append_event_to_queue returned 0");
+	return 11;	
+  }
+
+  return 1;
+}
+
+__device__
+char handle_event(Event *message)
+{
+  switch(message->receiver) {
+    case 0: {
+      /* phold */
+      switch(message->type) {
+        case EVENT: {
+          return phold(message->receiver, message->timestamp, message);
+        }
+        case LP_FINI: {
+          return 0;
+        }
+      default:
+        printf("[ERROR]: EVENT TYPE %u UNKNOWN", message->type);
+        //abort();
+      }
+    break;
+    }
+  }
+}
 
 
 __device__
-static uint get_receiver(uint me, curandState_t *cr_state, int now)
-{
-	int cur_hot_phase = (now / PHASE_WINDOW_SIZE);
-	double HOT_FRACTION = load_trace[cur_hot_phase];
-	return random(cr_state, HOT_FRACTION * g_n_nodes)/(HOT_FRACTION);
+void collect_statistics(uint nid) {
+	return;
 }
 
-__device__ // private
-char handle_event_type_1(Event *event) {
-	uint nid = event->receiver;
-
-#if OPTM_SYNC == 1
-	uint lpid = nid / g_nodes_per_lp;
-
-	if (state_queue_is_full(lpid)) { return 12; }
-	if (antimsg_queue_is_full(lpid)) { return 13; }
-#endif
-
-	curandState_t *cr_state = &(nodes.cr_state[nid]);
-
-	State old_state;
-	old_state.cr_state = *cr_state;
-
-	Event new_event;
-	new_event.type = 1;
-	new_event.sender = nid;
-	new_event.receiver = get_receiver(nid, cr_state, event->timestamp);
-	new_event.timestamp = event->timestamp + lookahead +
-		random_exp(cr_state, mean);
-
-	char res = append_event_to_queue(&new_event);
-
-	if (res == 0) {
-		nodes.cr_state[nid] = old_state.cr_state;
-		return 11;
-	}
-
-#if OPTM_SYNC == 1
-	append_state_to_queue(&old_state, lpid);
-	append_antimsg_to_queue(&new_event);
-#endif
-
-	return 1;
+__device__
+void print_statistics() {
+	printf("STATISTICS NOT AVAILABLE\n");
 }
 
 #if OPTM_SYNC == 1
@@ -180,17 +248,6 @@ void reverse_event_type_1(Event *event) {
 	undo_event(antimsg);
 }
 #endif
-
-__device__
-char handle_event(Event *event) {
-	uint type = event->type;
-
-	if (type == 1) {
-		return handle_event_type_1(event);
-	} else {
-		return 0;
-	}
-}
 
 #if OPTM_SYNC == 1
 __device__
@@ -214,14 +271,9 @@ uint get_number_antimsgs(Event *event) {
 #endif
 
 __device__
-void collect_statistics(uint nid) {
-	return;
-}
+static void busy_loop(double duration) {}
 
-__device__
-void print_statistics() {
-	printf("STATISTICS NOT AVAILABLE\n");
-}
+
 
 extern "C" {
 #include <core/core.h>
@@ -233,8 +285,8 @@ extern void process_device_align_msg(unsigned lid, simtime_t time);
 
 
 void copy_nodes_from_host(uint n_nodes) {
-	Nodes h_nodes;
-	cudaMemcpyFromSymbol(&h_nodes, nodes, sizeof(Nodes));
+	PHoldNodes h_nodes;
+	cudaMemcpyFromSymbol(&h_nodes, nodes, sizeof(PHoldNodes));
 	cudaMemcpy(h_nodes.cr_state, simulation_snapshot, sizeof(curandState_t) * n_nodes, cudaMemcpyHostToDevice);
 
 	EQs h_eq;
@@ -249,8 +301,8 @@ void copy_nodes_from_host(uint n_nodes) {
 
 
 void copy_nodes_to_host(uint n_nodes) {
-	Nodes h_nodes;
-	cudaMemcpyFromSymbol(&h_nodes, nodes, sizeof(Nodes));
+	PHoldNodes h_nodes;
+	cudaMemcpyFromSymbol(&h_nodes, nodes, sizeof(PHoldNodes));
 	cudaMemcpy(simulation_snapshot, h_nodes.cr_state, sizeof(curandState_t) * n_nodes, cudaMemcpyDeviceToHost);
 
 	EQs h_eq;
@@ -401,3 +453,4 @@ extern "C" void align_host_to_device_parallel(simtime_t gvt){
 	}
 
 }
+    

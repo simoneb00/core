@@ -30,6 +30,10 @@ extern struct simulation_configuration global_config;
 #include "nelder_mead_3d.h"
 #include "statistics.cu"
 
+#ifdef COMPADS_DESL
+#include "COMPADS/application.h"
+#endif
+
 /* Global variables*/
 __device__ uint g_n_nodes;
 __device__ uint g_n_lps;
@@ -103,6 +107,10 @@ static void magic_numbers(int n)
 	events_per_node = 50;
 	states_per_node = 30;
 	antimsgs_per_node = 30;
+
+	#ifdef COMPADS_DESL
+	events_per_node = 100;
+	#endif
 
 	/* For Kademlia models */
 	//	events_per_node = 30;
@@ -200,7 +208,14 @@ bool gpu_configure(lp_id_t n_lps)
 
 	char res = 0;
 	res += malloc_nodes(n_nodes);
+
+	if (!res) {
+		printf("ERROR: malloc_nodes failed.\n");
+	}
 	res += malloc_queues(n_nodes, events_per_node, states_per_node, antimsgs_per_node);
+	if (res < 2) {
+		printf("ERROR: malloc_queues failed.\n");
+	}
 
 	if(res != 2) {
 		free_nodes();
@@ -210,6 +225,16 @@ bool gpu_configure(lp_id_t n_lps)
 		return true;
 	}
 
+#ifdef COMPADS_DESL
+	crc_table_init();
+
+	size_t stack_limit = 2 * sizeof(State) + 1024 ; 
+	cudaDeviceSetLimit(cudaLimitStackSize, stack_limit);
+
+	size_t actual_limit;
+	cudaDeviceGetLimit(&actual_limit, cudaLimitStackSize);
+
+#endif
 	// Initialization
 	kernel_set_params<<<1, 1>>>(n_nodes, n_lps, nodes_per_lp, events_per_node, states_per_node,
 	    antimsgs_per_node, d_model_params, n_params);
@@ -250,6 +275,7 @@ thrd_ret_t THREAD_CALL_CONV gpu_main_loop(void *args)
 	int gvt = 0, prev_gvt = 0;
 
 	while(!sim_can_end()) {
+
 		// Get minimal timestamp of all next events
 		gvt = get_gvt(d_ts_temp);
 
@@ -365,6 +391,7 @@ thrd_ret_t THREAD_CALL_CONV gpu_main_loop(void *args)
 		//}
 
 		// Handle next event
+
 		while(1) {
 			h_inac_1 = h_inac_2 = h_inac_3 = 0;
 			h_inac_4 = h_inac_5 = h_inac_6 = 0;
@@ -375,6 +402,7 @@ thrd_ret_t THREAD_CALL_CONV gpu_main_loop(void *args)
 			cudaMemcpy(d_inac_5, &h_inac_5, sizeof(uint), cudaMemcpyHostToDevice);
 			cudaMemcpy(d_inac_6, &h_inac_6, sizeof(uint), cudaMemcpyHostToDevice);
 
+
 #if(OPTM_SYNC == 1)
 			kernel_handle_next_event<<<n_blocks, threads_per_block>>>(gvt, window_size, d_inac_1, d_inac_2,
 			    d_inac_3, d_inac_4, d_inac_5, d_inac_6);
@@ -382,6 +410,7 @@ thrd_ret_t THREAD_CALL_CONV gpu_main_loop(void *args)
 			kernel_handle_next_event<<<n_blocks, threads_per_block>>>(gvt, h_lookahead, d_inac_1, d_inac_2,
 			    d_inac_3, d_inac_4, d_inac_5, d_inac_6);
 #endif
+
 
 			cudaMemcpy(&h_inac_1, d_inac_1, sizeof(uint), cudaMemcpyDeviceToHost);
 			cudaMemcpy(&h_inac_2, d_inac_2, sizeof(uint), cudaMemcpyDeviceToHost);
